@@ -1,0 +1,354 @@
+---
+title: "Exploring parks data"
+author: "Nicholas Tierney"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs, echo = FALSE, include = FALSE}
+library(tidyverse)
+library(vctrs)
+library(tsibble)
+conflicted::conflict_prefer("filter", "dplyr")
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("pluck", "purrr")
+```
+
+
+# Reading
+
+```{r}
+park_visits <- readr::read_csv(here::here("data/park-visits.csv"))
+gas_price <- readr::read_csv(here::here("data/gas-price.csv"))
+state_pop <- readr::read_csv(here::here("data/state-pop.csv"))
+```
+
+# Parks
+
+Initial cleaning
+
+```{r}
+visdat::vis_dat(park_visits)
+naniar::miss_var_summary(park_visits)
+summary(park_visits)
+# are columns completely unique for their length?
+vec_size(park_visits)
+
+completely_unique <- function(x) vec_unique_count(x) == 1
+prop_unique <- function(x) (vec_unique_count(x) / vec_size(x))
+
+# is everything totally unique?
+map_lgl(park_visits, completely_unique)
+map_lgl(park_visits, completely_unique) %>% any()
+map_lgl(park_visits, completely_unique) %>% which()
+
+# how unique are they?
+map_dfr(park_visits, prop_unique) %>% 
+  pivot_longer(cols = everything()) %>% 
+  arrange(-value)
+```
+
+Let's count the number of visitors
+
+```{r}
+count(park_visits, visitors) 
+```
+
+And how many different types of patterns do we have? We can count them twice
+
+```{r}
+count(park_visits, visitors) %>% 
+  count(n)
+```
+
+Lots of single visits, apparently?
+
+What is in number of records?
+
+```{r}
+n_distinct(park_visits$number_of_records)
+```
+
+```{r}
+park_visits_tidy <- park_visits %>% 
+  mutate(year = parse_number(year)) %>% 
+  # doesn't contain anything useful
+  select(-number_of_records) %>% 
+  # I want the visitor number after year
+  relocate(visitors, .after = year)
+```
+
+```{r}
+park_visits_tidy
+```
+
+Let's define this as a time series `tsibble`. However, to do so, we'll need to identify the index and key
+
+- index: "year"
+- key: park? 
+
+What defines a park?
+
+- `parkname`: character	Full park name
+- `unit_code`: character	Park code abbreviation
+- `unit_name`: character	Park Unit name
+- `unit_type`: character	Park unit type
+
+Are they the same length?
+
+```{r}
+park_visits_tidy %>% 
+  summarise_at(.vars = vars(parkname, unit_code, unit_name),
+               .funs = n_distinct)
+```
+
+Ok let's go `unit_name` to keep things simple, especially since `parkname` has a bunch of  missings. I think technically a park could be in multiple states so we won't add hierarchy here. We'll also remove the geometry column since it creates issued with `tsibble`.
+
+```{r}
+inspectdf::inspect_mem(park_visits_tidy) %>% inspectdf::show_plot()
+```
+
+
+# Exploring visitor counts
+
+So the visitor counts is the thing that I'm most interest in, I think.
+
+
+```{r}
+ggplot(park_visits_tidy,
+       aes(x = year,
+           y = visitors)) + 
+  geom_point()
+
+```
+
+outliers?
+
+```{r}
+ggplot(park_visits_tidy,
+       aes(x = visitors)) + 
+  geom_boxplot()
+
+```
+
+Where do these occur? Let's make the data a little bit smaller
+
+```{r}
+park_visits_cut <- park_visits_tidy %>% 
+  select(year, 
+         visitors,
+         region:unit_type)
+
+park_visits_cut %>% 
+  filter(visitors > 2.5e8)
+```
+
+Do we get large numbers of visitors when there are missing values?
+
+```{r}
+library(naniar)
+
+miss_var_summary(park_visits_cut)
+gg_miss_upset(park_visits_cut)
+
+park_visits_cut_nab <- nabular(park_visits_cut)
+
+park_visits_cut_nab %>% 
+  group_by(year_NA) %>% 
+  summarise(max_visitors = max(visitors, na.rm = TRUE))
+
+ggplot(park_visits_cut_nab,
+       aes(x = year_NA,
+           y = visitors)) + 
+  geom_boxplot()
+  
+  
+```
+
+OK so based on that I think I should remove the rows that contain missing values for year and visitor_NA.
+
+```{r}
+park_visits_cut_na <- park_visits_cut %>% 
+  drop_na()
+```
+
+OK now let's add on data for the state population, and the gas price, to make things a bit more interesting.  Let's quickly 
+
+```{r}
+park_visits_ts <- park_visits_cut_na %>% 
+  left_join(gas_price, by = "year") %>% 
+  left_join(state_pop, by = c("year", "state")) %>% 
+  as_tsibble(key = unit_name,
+             index = year)
+
+park_visits_ts
+```
+
+OK, so now we get some nice spaghetti.
+
+```{r}
+gg_park_visits_spag <- ggplot(park_visits_ts,
+       aes(x = year,
+           y = visitors,
+           group = unit_name)) + 
+  geom_line()
+```
+
+Let's use brolgar to help inspect that
+
+```{r}
+library(brolgar)
+gg_park_visits_spag + facet_strata(along = pop)
+gg_park_visits_spag + facet_strata(along = gas_constant)
+```
+
+Let's use `keys_near` to identify those parks near the five number summary:
+
+```{r}
+park_visits_ts %>% 
+  keys_near(visitors)
+```
+
+huh, filter out the zeros?
+
+```{r}
+park_visits_ts %>% 
+  filter(visitors > 0) %>% 
+  keys_near(visitors) 
+
+park_visits_ts_near <- park_visits_ts %>% 
+  filter(visitors > 0) %>% 
+  keys_near(visitors) %>% 
+  select(-visitors) %>% 
+  left_join(park_visits_ts, by = "unit_name")
+
+park_visits_ts_near
+```
+
+plot these
+
+```{r park-near-vis}
+library(stickylabeller)
+ggplot(park_visits_ts_near,
+       aes(x = year,
+           y = visitors,
+           colour = stat)) + 
+  geom_line() +
+  facet_wrap(~stat + unit_name, 
+             scales = "free_y",
+             labeller = label_glue("Park: {unit_name} \nNearest to {stat}")) + 
+  theme(legend.position = "none")
+```
+
+Now plot them by the slope of year, another way of looking at it
+
+```{r park-near-year, fig.height = 20}
+
+park_visits_ts_lm_near <- park_visits_ts %>% 
+  filter(visitors > 0) %>% 
+  key_slope(visitors ~ year) %>% 
+  keys_near(key = unit_name,
+            var = .slope_year,
+            top_n = 6) %>% 
+  left_join(park_visits_ts, by = "unit_name") 
+
+library(stickylabeller)
+
+ggplot(park_visits_ts_lm_near,
+       aes(x = year,
+           y = visitors,
+           colour = stat)) + 
+  geom_smooth(method = "lm", se = FALSE,
+              colour = "grey50",
+              alpha = 0.5,
+              size = 0.5) +
+  geom_line() +
+  facet_wrap(~stat + unit_name, 
+             scales = "free_y",
+             labeller = label_glue("Park: {unit_name} \nNearest to {stat} slope"),
+             nrow = 10) + 
+  theme(legend.position = "none")
+```
+
+Now can we add in the other variables, population size and gas to see if there's something interesting there?
+
+```{r park-near-pop, fig.height = 20}
+park_visits_lm_gas_pop <- park_visits_ts %>% 
+  drop_na(pop) %>% 
+  filter(visitors > 0) %>% 
+  key_slope(visitors ~ year + pop + gas_constant)
+
+park_visits_ts_lm_pop_near <- park_visits_lm_gas_pop %>% 
+  keys_near(key = unit_name,
+            var = .slope_pop,
+            top_n = 6) %>% 
+  left_join(park_visits_ts, by = "unit_name") 
+
+library(stickylabeller)
+
+ggplot(park_visits_ts_lm_near,
+       aes(x = year,
+           y = visitors,
+           colour = stat)) + 
+  geom_smooth(method = "lm", se = FALSE,
+              colour = "grey50",
+              alpha = 0.5,
+              size = 0.5) +
+  geom_line() +
+  facet_wrap(~stat + unit_name, 
+             scales = "free_y",
+             labeller = label_glue("Park: {unit_name} \nNearest to {stat} slope"),
+             nrow = 10) + 
+  theme(legend.position = "none")
+
+```
+
+
+Are some of them always increasing?
+
+
+
+# Gas price
+
+```{r}
+summary(gas_price)
+
+ggplot(gas_price,
+       aes(x = year,
+           y = gas_constant)) + 
+  geom_line()
+```
+
+# State Pop
+
+```{r}
+state_pop
+```
+
+## Reproducibility
+
+<details><summary>Reproducibility receipt</summary>
+
+```{r}
+## datetime
+Sys.time()
+
+## repository
+if(requireNamespace('git2r', quietly = TRUE)) {
+  git2r::repository()
+} else {
+  c(
+    system2("git", args = c("log", "--name-status", "-1"), stdout = TRUE),
+    system2("git", args = c("remote", "-v"), stdout = TRUE)
+  )
+}
+
+## session info
+sessionInfo()
+```
+
+</details>

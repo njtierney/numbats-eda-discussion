@@ -1,0 +1,87 @@
+---
+title: "autoEDA"
+author: "Nicholas Tierney"
+date: "19/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs}
+library(tidyverse)
+```
+
+```{r}
+# install.packages("xray")
+# install.packages("skimr")
+# install.packages("autoEDA")
+park_visits <- readr::read_csv(here::here("data/park-visits.csv"))
+gas_price <- readr::read_csv(here::here("data/gas-price.csv"))
+state_pop <- readr::read_csv(here::here("data/state-pop.csv"))
+
+xray::anomalies(park_visits)
+xray::distributions(park_visits)
+
+park_visits %>% 
+  mutate(year = parse_number(year),
+         year = as.Date(paste0(year,"-01-01"))) %>% 
+  xray::timebased(date_variable = "year")
+
+
+```
+
+# inspectdf
+
+## summary of column types
+
+```{r}
+library(inspectdf)
+inspect_types(park_visits) 
+inspect_types(park_visits) %>% show_plot()
+```
+
+## summary of memory usage of columns
+
+```{r}
+inspect_mem(park_visits)
+inspect_mem(park_visits)  %>% show_plot()
+```
+
+## columnwise prevalence of missing values
+
+```{r}
+inspect_na(park_visits)
+inspect_na(park_visits)  %>% show_plot()
+```
+
+## correlation coefficients of numeric columns
+
+```{r}
+# errored
+# inspect_cor(park_visits)
+# inspect_cor(park_visits) %>% show_plot()
+```
+
+## feature imbalance of categorical columns
+
+```{r}
+inspect_imb(park_visits)
+inspect_imb(park_visits) %>% show_plot()
+```
+
+## summaries of numeric columns
+
+```{r}
+inspect_num(park_visits)
+inspect_num(park_visits)  %>% show_plot()
+```
+
+## summaries of categorical columns
+
+```{r}
+inspect_cat(park_visits) 
+inspect_cat(park_visits)  %>% show_plot() 
+```
+
